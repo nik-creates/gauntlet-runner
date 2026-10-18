@@ -1,0 +1,64 @@
+name: grade
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Gateway job id
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grade-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Claim and prepare
+        id: claim
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          RUNNER_KEY: ${{ secrets.RUNNER_KEY }}
+        run: python3 scripts/runner.py claim
+
+      - name: Pull image
+        id: pull
+        env:
+          IMAGE: ${{ steps.claim.outputs.image }}
+        run: docker pull --quiet "$IMAGE" > /dev/null
+
+      - name: Sandbox
+        env:
+          IMAGE: ${{ steps.claim.outputs.image }}
+          LIMIT: ${{ steps.claim.outputs.timeout }}
+        run: |
+          W="$RUNNER_TEMP/work"
+          set +e
+          timeout --signal=KILL "$LIMIT" docker run --rm \
+            --network none --read-only --tmpfs /tmp:rw,size=256m \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 256 --memory 1g --cpus 1 --user 65534:65534 \
+            -v "$W/repo:/work/repo:rw" -v "$W/tests:/work/tests:ro" -v "$W/out:/out:rw" \
+            -w /work/repo \
+            "$IMAGE" bash /work/tests/run.sh > /dev/null 2>&1
+          echo $? > "$W/exit_code"
+          exit 0
+
+      - name: Report
+        if: always()
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+          RUNNER_KEY: ${{ secrets.RUNNER_KEY }}
+          CLAIM_OUTCOME: ${{ steps.claim.outcome }}
+          PULL_OUTCOME: ${{ steps.pull.outcome }}
+        run: python3 scripts/runner.py report
